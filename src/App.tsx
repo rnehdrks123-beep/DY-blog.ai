@@ -14,7 +14,6 @@ import {
   TrendingUp,
   MessageSquare
 } from "lucide-react";
-import { GoogleGenAI } from "@google/genai";
 
 // ==========================================
 // [ API KEY 설정 ]
@@ -26,6 +25,26 @@ const API_KEY = "";
 export default function App() {
   // 탭 상태: 'reply' (리뷰 답글 생성기) | 'news' (플레이스 소식 자동 기획)
   const [activeTab, setActiveTab] = useState<"reply" | "news">("reply");
+
+  // ------------------------------------------
+  // API 설정 상태 관리
+  // ------------------------------------------
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [userApiKey, setUserApiKey] = useState("");
+
+  useEffect(() => {
+    const saved = localStorage.getItem("DYMONTH_GEMINI_API_KEY");
+    if (saved) {
+      setUserApiKey(saved);
+    }
+  }, []);
+
+  const saveApiKey = (key: string) => {
+    localStorage.setItem("DYMONTH_GEMINI_API_KEY", key);
+    setUserApiKey(key);
+    triggerToast("🔑 API Key가 저장되었습니다!");
+    setIsSettingsOpen(false);
+  };
 
   // ------------------------------------------
   // 공통 상태 관리
@@ -100,28 +119,103 @@ export default function App() {
     }
   };
 
-  // Helper to initialize Gemini client on the browser dynamically
-  const getGeminiClient = () => {
-    // 1. Check hardcoded variable first
-    // 2. Check process.env.GEMINI_API_KEY (substituted via Vite define)
-    // 3. Check import.meta.env.VITE_GEMINI_API_KEY
-    const key = API_KEY || 
-                (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) || 
-                (import.meta as any).env?.VITE_GEMINI_API_KEY;
+  // ------------------------------------------
+  // Direct Gemini API REST fetch function
+  // ------------------------------------------
+  const callGeminiAPI = async (systemInstruction: string, prompt: string): Promise<string> => {
+    const savedKey = localStorage.getItem("DYMONTH_GEMINI_API_KEY");
+    const bakedKey1 = typeof process !== "undefined" && process.env?.GEMINI_API_KEY;
+    const bakedKey2 = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+    
+    const key = (savedKey && savedKey.trim() !== "") ? savedKey : (API_KEY || bakedKey1 || bakedKey2);
 
     if (!key || key.trim() === "" || key === "MY_GEMINI_API_KEY") {
       throw new Error(
-        "Gemini API Key가 구성되지 않았습니다. AI Studio의 Settings > Secrets에서 GEMINI_API_KEY 키를 등록하고 저장해 주시거나, 소스 코드 상단의 API_KEY 변수에 키를 입력해 주세요."
+        "Gemini API Key가 구성되지 않았습니다. 우측 상단의 'API Key 설정' 버튼을 눌러 API Key를 입력해 주시거나, AI Studio의 Settings > Secrets에서 GEMINI_API_KEY를 설정해 주세요."
       );
     }
-    return new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
+
+    const modelName = "gemini-3.5-flash";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key.trim()}`;
+
+    const payload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt
+            }
+          ]
+        }
+      ],
+      systemInstruction: {
+        parts: [
+          {
+            text: systemInstruction
+          }
+        ]
       },
-    });
+      generationConfig: {
+        temperature: 0.75
+      }
+    };
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+    } catch (networkError: any) {
+      throw new Error(`네트워크 연결 오류가 발생했습니다: ${networkError.message}`);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+
+    // response.json() 호출 전에 response.ok와 Content-Type을 확인합니다.
+    if (!response.ok) {
+      if (contentType.includes("application/json")) {
+        try {
+          const errorJson = await response.json();
+          const errorMessage = errorJson.error?.message || "알 수 없는 API 에러가 발생했습니다.";
+          throw new Error(`Gemini API 오류: ${errorMessage}`);
+        } catch (e: any) {
+          throw new Error(`Gemini API 호출 실패 (상태 코드: ${response.status})`);
+        }
+      } else {
+        // HTML 응답은 JSON으로 파싱하지 않습니다.
+        const errorText = await response.text();
+        throw new Error(`Gemini API 오류 (상태 코드: ${response.status}): ${errorText.substring(0, 150)}`);
+      }
+    }
+
+    if (!contentType.includes("application/json")) {
+      // HTML 응답은 JSON으로 파싱하지 않습니다.
+      const rawText = await response.text();
+      throw new Error(`올바르지 않은 응답 형식(Content-Type: ${contentType})을 받았습니다.`);
+    }
+
+    let data: any;
+    try {
+      data = await response.json();
+    } catch (parseError: any) {
+      throw new Error("API 응답을 파싱하는 도중 오류가 발생했습니다.");
+    }
+
+    const candidates = data.candidates;
+    if (!candidates || candidates.length === 0) {
+      throw new Error("API 응답 결과(candidates)가 존재하지 않습니다.");
+    }
+
+    const replyText = candidates[0]?.content?.parts[0]?.text;
+    if (!replyText) {
+      throw new Error("API 응답 본문(text)이 존재하지 않습니다.");
+    }
+
+    return replyText.trim();
   };
 
   // ------------------------------------------
@@ -138,7 +232,6 @@ export default function App() {
     setReplyOutput("");
 
     try {
-      const ai = getGeminiClient();
       const systemInstruction = `당신은 네이버 플레이스 매장을 운영하는 사장님입니다. 고객들이 소중하게 남겨준 리뷰에 감동을 표현하고, 따뜻하고 정중하게 답글을 작성하는 베테랑 사장님입니다.`;
       
       const prompt = `
@@ -157,21 +250,8 @@ export default function App() {
 "${reviewInput}"
 `;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.75,
-        },
-      });
-
-      const replyText = response.text;
-      if (!replyText) {
-        throw new Error("답글을 생성하는 도중 빈 응답을 받았습니다.");
-      }
-
-      setReplyOutput(replyText.trim());
+      const result = await callGeminiAPI(systemInstruction, prompt);
+      setReplyOutput(result);
       triggerToast("✨ 감동을 담은 맞춤형 답글이 생성되었습니다!");
     } catch (err: any) {
       setReplyError(err.message || "답글 생성에 실패했습니다. API 키를 확인해 주세요.");
@@ -202,7 +282,6 @@ export default function App() {
     setNewsOutput("");
 
     try {
-      const ai = getGeminiClient();
       const systemInstruction = `당신은 네이버 플레이스 마케팅 전문가이자 매장 소식 기획자입니다. 방문자들의 호기심과 방문 욕구를 자극하는 매력적인 소식 글을 기획하는 능력이 탁월합니다.`;
 
       const prompt = `
@@ -223,21 +302,8 @@ export default function App() {
 - 핵심 키워드: ${keywordInput}
 `;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.8,
-        },
-      });
-
-      const newsText = response.text;
-      if (!newsText) {
-        throw new Error("소식을 생성하는 도중 빈 응답을 받았습니다.");
-      }
-
-      setNewsOutput(newsText.trim());
+      const result = await callGeminiAPI(systemInstruction, prompt);
+      setNewsOutput(result);
       triggerToast("📝 플레이스에 등록할 매력적인 소식이 완성되었습니다!");
     } catch (err: any) {
       setNewsError(err.message || "소식 생성에 실패했습니다. API 키를 확인해 주세요.");
@@ -259,8 +325,64 @@ export default function App() {
               소상공인 대표님들의 소중한시간을 아껴주는 AI자동화 도구
             </p>
           </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+              className="px-3.5 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+            >
+              <HelpCircle className="w-4 h-4 text-slate-500" />
+              API Key 설정
+            </button>
+          </div>
         </div>
       </header>
+
+      {isSettingsOpen && (
+        <div className="bg-slate-50 border-b border-slate-200 animate-in fade-in slide-in-from-top-4 duration-200">
+          <div className="max-w-[900px] mx-auto px-4 py-5">
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs max-w-lg">
+              <h3 className="font-semibold text-slate-800 text-sm flex items-center gap-1.5 mb-2">
+                🔑 Gemini API Key 설정
+              </h3>
+              <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                Google AI Studio의 <strong>Settings &gt; Secrets</strong>에 <strong>GEMINI_API_KEY</strong>를 등록하고 저장하신 경우, 배포 시 자동으로 해당 키를 사용하여 동작하므로 추가 입력하지 않으셔도 괜찮습니다.
+                <br />
+                만약 정적 웹 호스팅(GitHub Pages 등)에 배포하시거나 개인 키를 직접 설정하고 싶으시다면 아래에 입력해 주세요. (입력 시 브라우저 로컬 저장소에 안전하게 저장됩니다)
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="password"
+                  value={userApiKey}
+                  onChange={(e) => setUserApiKey(e.target.value)}
+                  placeholder="AI Studio 또는 Google AI Studio에서 발급받은 API 키 입력"
+                  className="flex-1 bg-white border border-slate-200 text-xs px-3 py-2 rounded-lg focus:outline-none focus:ring-1 focus:ring-point"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => saveApiKey(userApiKey)}
+                    className="flex-1 sm:flex-none bg-point hover:bg-point/90 text-white text-xs font-semibold px-4 py-2 rounded-lg transition-all cursor-pointer text-center"
+                  >
+                    저장
+                  </button>
+                  {localStorage.getItem("DYMONTH_GEMINI_API_KEY") && (
+                    <button
+                      onClick={() => {
+                        localStorage.removeItem("DYMONTH_GEMINI_API_KEY");
+                        setUserApiKey("");
+                        triggerToast("🗑️ 로컬 저장된 API Key가 삭제되었습니다. 기본 환경변수 키를 사용합니다.");
+                        setIsSettingsOpen(false);
+                      }}
+                      className="flex-1 sm:flex-none bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-semibold px-3 py-2 rounded-lg transition-all cursor-pointer text-center"
+                    >
+                      초기화
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MAIN CONTAINER */}
       <main className="flex-1 max-w-[900px] w-full mx-auto px-4 py-8 md:py-12">

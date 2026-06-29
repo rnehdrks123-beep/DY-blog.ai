@@ -1,0 +1,8 @@
+{
+  "name": "DyMonth AI마케팅 자동화 시스템",
+  "description": "소상공인 대표님들의 소중한시간을 아껴주는 AI자동화 도구 (리뷰 답글 생성, 플레이스 소식 자동 기획)",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
